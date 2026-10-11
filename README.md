@@ -1,5 +1,3 @@
-# kucoin-tarama2
-
 <!DOCTYPE html>
 <html lang="tr">
 <head>
