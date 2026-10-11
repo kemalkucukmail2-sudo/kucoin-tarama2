@@ -402,7 +402,7 @@ async function startScan(){
     const liquid=new Set(prices
       .filter(p=>symbols.includes(p.symbol)&&+p.quoteVolume>=1000000)
       .sort((a,b)=>+b.quoteVolume-+a.quoteVolume)
-      .slice(0,100).map(p=>p.symbol));
+      .slice(0,506).map(p=>p.symbol));
 
     const list=symbols.filter(s=>liquid.has(s));
     let done=0;
