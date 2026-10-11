@@ -25,9 +25,7 @@ th{background:#202b3a;color:#b9c8da;position:sticky;top:0}
 .sell{color:#ff7474;font-weight:bold}
 .watchup{color:#ffd166;font-weight:bold}
 .watchdown{color:#ff9f7a;font-weight:bold}
-.neutral{color:#aab6c7}
 .small{font-size:12px;color:#9cabbf}
-a{color:#6cb6ff}
 </style>
 </head>
 <body>
@@ -36,8 +34,7 @@ a{color:#6cb6ff}
 <p>Binance Spot USDT pariteleri · 1 saatlik sinyal · 4 saatlik EMA200 filtresi</p>
 
 <button id="scanBtn" onclick="startScan()">TEKRAR TARA</button>
-
-<div id="status">Tarama başlatılmaya hazır. Tarama yalnızca düğmeye bastığında çalışır.</div>
+<div id="status">Tarama başlatılmaya hazır.</div>
 
 <div class="summary">
   <div class="pill">Taranan: <b id="scanned">0</b></div>
@@ -48,9 +45,12 @@ a{color:#6cb6ff}
 
 <div class="filters">
   <button class="active" onclick="setFilter('ALL',this)">TÜM UYARILAR</button>
-  <button onclick="setFilter('UP',this)">YÜKSELİŞ TAKİBİ</button>
-  <button onclick="setFilter('DOWN',this)">DÜŞÜŞ TAKİBİ</button>
-  <button onclick="setFilter('TRADE',this)">AL / SAT</button>
+  <button onclick="setFilter('UP',this)">YÜKSELİŞ ÖNCESİ TAKİP</button>
+  <button onclick="setFilter('AL',this)">AL</button>
+  <button onclick="setFilter('STRONG_AL',this)">GÜÇLÜ AL</button>
+  <button onclick="setFilter('DOWN',this)">DÜŞÜŞ ÖNCESİ TAKİP</button>
+  <button onclick="setFilter('SAT',this)">SAT</button>
+  <button onclick="setFilter('STRONG_SAT',this)">GÜÇLÜ SAT</button>
 </div>
 
 <div class="tablewrap">
@@ -58,9 +58,9 @@ a{color:#6cb6ff}
 <thead>
 <tr>
 <th>Parite</th>
-<th>Uyarı / Sinyal</th>
+<th>Sinyal</th>
 <th>Güncel fiyat</th>
-<th>Son 1s kapanışı</th>
+<th>24s hacim (USDT)</th>
 <th>RSI</th>
 <th>4s EMA200</th>
 </tr>
@@ -72,8 +72,8 @@ a{color:#6cb6ff}
 </div>
 
 <p class="small">
-Not: Erken takip uyarıları alım veya satım emri değildir. İşlem garantisi vermez.
-Fiyatlar ve göstergeler değişebilir. Bu sayfa gerçek işlem yapmaz.
+Tarama manuel çalışır ve gerçek alım-satım emri vermez.
+Sinyaller kesin kazanç garantisi değildir.
 </p>
 
 <script>
@@ -85,58 +85,64 @@ let isScanning = false;
 
 function setFilter(filter, button) {
   activeFilter = filter;
-  document.querySelectorAll(".filters button").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".filters button")
+    .forEach(b => b.classList.remove("active"));
   button.classList.add("active");
   renderResults();
 }
 
 function ema(values, period) {
   if (!values.length) return [];
-
   const k = 2 / (period + 1);
   const out = [values[0]];
 
   for (let i = 1; i < values.length; i++) {
     out.push(values[i] * k + out[i - 1] * (1 - k));
   }
-
   return out;
 }
 
+// TradingView ta.rsi() ile aynı Wilder/RMA yaklaşımı.
 function rsiSeries(closes, period = 14) {
   const out = Array(closes.length).fill(null);
   if (closes.length <= period) return out;
 
-  let gains = 0;
-  let losses = 0;
+  let gainSum = 0;
+  let lossSum = 0;
 
   for (let i = 1; i <= period; i++) {
     const change = closes[i] - closes[i - 1];
-
-    if (change > 0) gains += change;
-    else losses -= change;
+    gainSum += Math.max(change, 0);
+    lossSum += Math.max(-change, 0);
   }
 
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
 
-  function calc(g, l) {
-    if (l === 0) return g === 0 ? 50 : 100;
-    return 100 - 100 / (1 + g / l);
+  function value(gain, loss) {
+    if (loss === 0) return gain === 0 ? 50 : 100;
+    if (gain === 0) return 0;
+    return 100 - 100 / (1 + gain / loss);
   }
 
-  out[period] = calc(avgGain, avgLoss);
+  out[period] = value(avgGain, avgLoss);
 
   for (let i = period + 1; i < closes.length; i++) {
     const change = closes[i] - closes[i - 1];
-
     avgGain = (avgGain * (period - 1) + Math.max(change, 0)) / period;
     avgLoss = (avgLoss * (period - 1) + Math.max(-change, 0)) / period;
-
-    out[i] = calc(avgGain, avgLoss);
+    out[i] = value(avgGain, avgLoss);
   }
 
   return out;
+}
+
+function macdSeries(closes) {
+  const fast = ema(closes, 12);
+  const slow = ema(closes, 26);
+  const line = closes.map((_, i) => fast[i] - slow[i]);
+  const signal = ema(line, 9);
+  return {line, signal};
 }
 
 async function getJSON(url) {
@@ -145,8 +151,8 @@ async function getJSON(url) {
   return response.json();
 }
 
-function analyzePair(symbol, candles1h, candles4h, currentPrice) {
-  // Son mum açık olabileceğinden değerlendirmeye alınmaz.
+function analyzePair(symbol, candles1h, candles4h, currentPrice, quoteVolume) {
+  // Açık olan son mum sinyal hesabına katılmaz.
   const c1 = candles1h.slice(0, -1);
   const c4 = candles4h.slice(0, -1);
 
@@ -157,13 +163,7 @@ function analyzePair(symbol, candles1h, candles4h, currentPrice) {
 
   const e20 = ema(close, 20);
   const e50 = ema(close, 50);
-
-  const macdLine = close.map((_, i) => {
-    return ema(close.slice(0, i + 1), 12).at(-1) -
-           ema(close.slice(0, i + 1), 26).at(-1);
-  });
-
-  const macdSignal = ema(macdLine, 9);
+  const macd = macdSeries(close);
   const rsi = rsiSeries(close, 14);
 
   const i = close.length - 1;
@@ -178,58 +178,81 @@ function analyzePair(symbol, candles1h, candles4h, currentPrice) {
   const crossUp = e20[p] <= e50[p] && e20[i] > e50[i];
   const crossDown = e20[p] >= e50[p] && e20[i] < e50[i];
 
-  const macdUp = macdLine[i] > macdSignal[i];
-  const macdDown = macdLine[i] < macdSignal[i];
+  const macdUp = macd.line[i] > macd.signal[i];
+  const macdDown = macd.line[i] < macd.signal[i];
 
-  const macdImproving = macdLine[i] > macdLine[p];
-  const macdWeakening = macdLine[i] < macdLine[p];
+  const macdImproving = macd.line[i] > macd.line[p];
+  const macdWeakening = macd.line[i] < macd.line[p];
 
   const gapNow = Math.abs(e20[i] - e50[i]) / lastClose;
   const gapBefore = Math.abs(e20[p] - e50[p]) / close[p];
   const gapNarrowing = gapNow < gapBefore;
 
-  const avgVol = volume.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
+  const avgVol =
+    volume.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
   const volumeOK = avgVol > 0 && volume[i] >= avgVol;
 
   const close4h = c4.map(x => Number(x[4]));
   const ema200_4h = ema(close4h, 200).at(-1);
   const price4h = close4h.at(-1);
-
   const trendOK = price4h > ema200_4h;
 
   let signal = "";
   let type = "";
   let cls = "";
 
-  // GÜÇLÜ AL: TradingView'deki koşullarla aynı mantık.
-  // 4s kapanışı EMA200 üzerinde,
-  // 1s EMA20 bu mumda EMA50'yi yukarı kesmiş,
-  // MACD çizgisi sinyal çizgisinin üzerinde,
-  // RSI en az 50 olmalı.
+  // TradingView:
+  // al = 4H trend + EMA20 crossover EMA50 + MACD above signal + RSI >= 40
+  // gucluAl = al + RSI >= 50
   const strongBuy =
     trendOK &&
     crossUp &&
     macdUp &&
     currentRSI >= 50;
 
-  // AL koşulu ve diğer sinyallerin mantığı korunur.
-  if (crossUp && macdUp && currentRSI >= 40 && trendOK) {
-    if (strongBuy) {
-      signal = "GÜÇLÜ AL";
-    } else {
-      signal = "AL";
-    }
+  // TradingView:
+  // sat = EMA20 crossunder EMA50 + MACD below signal + RSI <= 60
+  // gucluSat = sat + RSI <= 50
+  // Güçlü SAT için 4H filtresi kullanılmaz.
+  const strongSell =
+    crossDown &&
+    macdDown &&
+    currentRSI <= 50;
 
-    type = "TRADE";
+  const normalBuy =
+    trendOK &&
+    crossUp &&
+    macdUp &&
+    currentRSI >= 40;
+
+  const normalSell =
+    crossDown &&
+    macdDown &&
+    currentRSI <= 60;
+
+  // Güçlü AL / Güçlü SAT önce kontrol edilir.
+  if (strongBuy) {
+    signal = "GÜÇLÜ AL";
+    type = "STRONG_AL";
     cls = "buy";
 
-  } else if (crossDown && macdDown && currentRSI <= 60) {
-    signal = currentRSI <= 50 ? "GÜÇLÜ SAT" : "SAT";
-    type = "TRADE";
+  } else if (strongSell) {
+    signal = "GÜÇLÜ SAT";
+    type = "STRONG_SAT";
+    cls = "sell";
+
+  } else if (normalBuy) {
+    signal = "AL";
+    type = "AL";
+    cls = "buy";
+
+  } else if (normalSell) {
+    signal = "SAT";
+    type = "SAT";
     cls = "sell";
 
   } else {
-    // Erken yükseliş takibi.
+    // Takip kuralları değiştirilmedi.
     const earlyUp =
       !crossUp &&
       trendOK &&
@@ -242,7 +265,6 @@ function analyzePair(symbol, candles1h, candles4h, currentPrice) {
       currentRSI <= 60 &&
       volumeOK;
 
-    // Erken düşüş takibi.
     const earlyDown =
       !crossDown &&
       e20[i] >= e50[i] &&
@@ -258,7 +280,6 @@ function analyzePair(symbol, candles1h, candles4h, currentPrice) {
       signal = "YÜKSELİŞ ÖNCESİ TAKİP";
       type = "UP";
       cls = "watchup";
-
     } else if (earlyDown) {
       signal = "DÜŞÜŞ ÖNCESİ TAKİP";
       type = "DOWN";
@@ -274,31 +295,52 @@ function analyzePair(symbol, candles1h, candles4h, currentPrice) {
     type,
     cls,
     currentPrice: Number(currentPrice || lastClose),
-    lastClose,
+    quoteVolume: Number(quoteVolume || 0),
     rsi: currentRSI,
     trendOK
   };
 }
 
+function formatPrice(n) {
+  if (!Number.isFinite(n)) return "-";
+  if (n < 1) return n.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+  return n.toLocaleString("en-US", {
+    maximumFractionDigits: 6
+  });
+}
+
+function formatVolume(n) {
+  if (!Number.isFinite(n)) return "-";
+  return n.toLocaleString("en-US", {
+    maximumFractionDigits: 0
+  }) + " USDT";
+}
+
 function renderResults() {
-  let rows = allResults.filter(r => {
+  const rows = allResults.filter(r => {
     if (activeFilter === "ALL") return true;
-    if (activeFilter === "UP") return r.type === "UP";
-    if (activeFilter === "DOWN") return r.type === "DOWN";
-    if (activeFilter === "TRADE") return r.type === "TRADE";
-    return true;
+    return r.type === activeFilter;
   });
 
-  rows.sort((a, b) => {
-    const order = {TRADE: 0, UP: 1, DOWN: 2};
-    return order[a.type] - order[b.type] ||
-      a.symbol.localeCompare(b.symbol);
-  });
+  const order = {
+    STRONG_AL: 0,
+    AL: 1,
+    UP: 2,
+    STRONG_SAT: 3,
+    SAT: 4,
+    DOWN: 5
+  };
+
+  rows.sort((a, b) =>
+    order[a.type] - order[b.type] ||
+    a.symbol.localeCompare(b.symbol)
+  );
 
   const tbody = document.getElementById("results");
 
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6">Bu filtrede uyarı bulunamadı.</td></tr>';
+    tbody.innerHTML =
+      '<tr><td colspan="6">Bu filtrede sinyal bulunamadı.</td></tr>';
     return;
   }
 
@@ -307,16 +349,13 @@ function renderResults() {
       <td><b>${r.symbol}</b></td>
       <td class="${r.cls}">${r.signal}</td>
       <td>${formatPrice(r.currentPrice)}</td>
-      <td>${formatPrice(r.lastClose)}</td>
+      <td>${formatVolume(r.quoteVolume)}</td>
       <td>${r.rsi.toFixed(1)}</td>
-      <td class="${r.trendOK ? 'buy' : 'sell'}">${r.trendOK ? 'ÜZERİNDE' : 'ALTINDA'}</td>
+      <td class="${r.trendOK ? 'buy' : 'sell'}">
+        ${r.trendOK ? 'ÜZERİNDE' : 'ALTINDA'}
+      </td>
     </tr>
   `).join("");
-}
-
-function formatPrice(n) {
-  if (!Number.isFinite(n)) return "-";
-  return n < 1 ? n.toFixed(8).replace(/0+$/, "").replace(/\.$/, "") : n.toFixed(4);
 }
 
 async function startScan() {
@@ -337,47 +376,64 @@ async function startScan() {
   try {
     status.textContent = "Binance Spot pariteleri alınıyor...";
 
-    const exchange = await getJSON(API + "/api/v3/exchangeInfo");
+    const [exchange, tickers] = await Promise.all([
+      getJSON(API + "/api/v3/exchangeInfo"),
+      getJSON(API + "/api/v3/ticker/24hr")
+    ]);
+
+    const tickerMap = {};
+    tickers.forEach(t => {
+      tickerMap[t.symbol] = {
+        price: Number(t.lastPrice),
+        volume: Number(t.quoteVolume)
+      };
+    });
 
     const symbols = exchange.symbols
       .filter(s =>
         s.status === "TRADING" &&
         s.quoteAsset === "USDT" &&
-        s.isSpotTradingAllowed
+        s.isSpotTradingAllowed !== false &&
+        tickerMap[s.symbol]
       )
       .map(s => s.symbol);
 
-    status.textContent = symbols.length + " parite bulundu. Tarama başladı...";
-    document.getElementById("scanned").textContent = "0";
-
-    const prices = {};
-
-    try {
-      const tickerData = await getJSON(API + "/api/v3/ticker/price");
-      tickerData.forEach(t => prices[t.symbol] = Number(t.price));
-    } catch (e) {
-      status.textContent = "Güncel fiyatlar alınamadı; kapanış fiyatları kullanılabilir.";
-    }
+    status.textContent =
+      symbols.length + " Spot USDT paritesi bulundu. Tarama başladı.";
 
     let completed = 0;
     let cursor = 0;
     const workerCount = 3;
 
     async function worker() {
-      while (cursor < symbols.length) {
-        const symbol = symbols[cursor++];
+      while (true) {
+        const index = cursor++;
+        if (index >= symbols.length) break;
+
+        const symbol = symbols[index];
 
         try {
           const [k1, k4] = await Promise.all([
-            getJSON(API + "/api/v3/klines?symbol=" + symbol + "&interval=1h&limit=100"),
-            getJSON(API + "/api/v3/klines?symbol=" + symbol + "&interval=4h&limit=220")
+            getJSON(API + "/api/v3/klines?symbol=" +
+              symbol + "&interval=1h&limit=500"),
+            getJSON(API + "/api/v3/klines?symbol=" +
+              symbol + "&interval=4h&limit=500")
           ]);
 
-          const result = analyzePair(symbol, k1, k4, prices[symbol]);
+          const ticker = tickerMap[symbol];
+
+          const result = analyzePair(
+            symbol,
+            k1,
+            k4,
+            ticker.price,
+            ticker.volume
+          );
+
           if (result) allResults.push(result);
 
         } catch (e) {
-          // Bir paritedeki hata tüm taramayı durdurmaz.
+          // Bir paritedeki hata diğer taramaları durdurmaz.
         }
 
         completed++;
@@ -386,13 +442,15 @@ async function startScan() {
           document.getElementById("scanned").textContent =
             completed + " / " + symbols.length;
 
-          status.textContent = "Tarama sürüyor: " + completed +
-            " / " + symbols.length + " parite";
+          status.textContent =
+            "Tarama sürüyor: " + completed + " / " + symbols.length;
         }
       }
     }
 
-    await Promise.all(Array.from({length: workerCount}, () => worker()));
+    await Promise.all(
+      Array.from({length: workerCount}, () => worker())
+    );
 
     document.getElementById("upCount").textContent =
       allResults.filter(r => r.type === "UP").length;
@@ -401,20 +459,23 @@ async function startScan() {
       allResults.filter(r => r.type === "DOWN").length;
 
     document.getElementById("signalCount").textContent =
-      allResults.filter(r => r.type === "TRADE").length;
+      allResults.filter(r =>
+        ["AL", "SAT", "STRONG_AL", "STRONG_SAT"].includes(r.type)
+      ).length;
 
     renderResults();
 
-    status.textContent = "Tarama tamamlandı: " +
-      symbols.length + " parite kontrol edildi. Son tarama: " +
+    status.textContent =
+      "Tarama tamamlandı: " + symbols.length +
+      " parite kontrol edildi. " +
       new Date().toLocaleString("tr-TR");
 
   } catch (e) {
     status.textContent =
-      "Tarama başarısız: Binance verilerine erişilemedi. Biraz sonra tekrar dene.";
+      "Tarama başarısız. İnternet bağlantısını kontrol edip tekrar dene.";
 
     document.getElementById("results").innerHTML =
-      '<tr><td colspan="6">Veri alınamadı. İnternet bağlantısını kontrol edip tekrar tara.</td></tr>';
+      '<tr><td colspan="6">Binance verilerine erişilemedi.</td></tr>';
 
   } finally {
     isScanning = false;
